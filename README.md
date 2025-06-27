@@ -1,2 +1,2 @@
-# tmdb-sync
-TMDB sync service for Kadracoon. Fetches and updates movie and image data from The Movie Database API.
+# Kadracoon TMDB Sync Service
+Fetches and updates movie data and frames from TMDB for internal use.
