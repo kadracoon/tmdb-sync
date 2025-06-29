@@ -3,7 +3,7 @@ from datetime import datetime
 import httpx
 from app.config import settings
 from app.mongo import movies_collection
-from app.tmdb_client import fetch_category, fetch_tv_category, fetch_best_frames
+from app.tmdb_client import fetch_category, fetch_tv_category, fetch_best_frames, fetch_discover_movies
 
 
 async def fetch_title_ru(item_id: int, content_type: str = "movie") -> str | None:
@@ -78,3 +78,31 @@ async def sync_tv_category(category: str):
         )
 
     return {"inserted_or_updated": len(results), "type": "tv", "category": category}
+
+
+async def sync_discover_movies(pages: int = 1):
+    total = 0
+    for page in range(1, pages + 1):
+        try:
+            data = await fetch_discover_movies(page)
+            results = data.get("results", [])
+
+            for movie in results:
+                movie = enrich_common_fields(movie, "movie", "discover")
+                movie["title_ru"] = await fetch_title_ru(movie["id"], "movie")
+                movie["frame_url"] = await fetch_best_frames(movie["id"], "movie")
+
+                if not movie["frame_url"]:
+                    continue
+
+                await movies_collection.update_one(
+                    {"id": movie["id"], "_type": "movie"},
+                    {"$set": movie},
+                    upsert=True
+                )
+                total += 1
+
+        except Exception as e:
+            print(f"[Page {page}] Failed to sync discover movies: {e}")
+
+    return {"inserted_or_updated": total, "source": "discover"}
