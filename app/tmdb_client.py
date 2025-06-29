@@ -67,3 +67,20 @@ async def fetch_best_frames(item_id: int, content_type: str = "movie", limit: in
         print(f"Failed to fetch frames for {content_type} {item_id}: {e}")
         return []
 
+
+async def fetch_discover_movies(page: int = 1) -> dict:
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{BASE_URL}/discover/movie",
+            params={
+                "api_key": settings.tmdb_api_key,
+                "language": "en-US",
+                "include_adult": False,
+                "sort_by": "popularity.desc",
+                "release_date.gte": "1980-01-01",
+                "release_date.lte": "2025-12-31",
+                "page": page,
+            }
+        )
+        resp.raise_for_status()
+        return resp.json()
