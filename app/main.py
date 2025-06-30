@@ -2,11 +2,12 @@ from typing import Literal
 
 from fastapi import FastAPI
 from app.sync import sync_category, sync_discover_movies
-from app.schemas import FrameReport
-from app.mongo import reports_collection
+from app.endpoints import reports
 
 
 app = FastAPI()
+app.include_router(reports.router)
+
 
 
 @app.post("/sync/{category}")
@@ -19,8 +20,3 @@ async def sync(category: Literal["popular", "top_rated", "upcoming"]):
 async def sync_discover(pages: int = 1):
     return await sync_discover_movies(pages)
 
-
-@app.post("/report")
-async def report_frame(report: FrameReport):
-    await reports_collection.insert_one(report.dict())
-    return {"status": "ok", "reported": report.frame_path}
