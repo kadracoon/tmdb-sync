@@ -3,13 +3,13 @@ from typing import Literal
 from fastapi import FastAPI, Query
 
 from app.endpoints import reports
+from app.meta import get_meta_info
 from app.sync import sync_category, sync_discover_movies
 from app.query import get_random_movie
 
 
 app = FastAPI()
 app.include_router(reports.router)
-
 
 
 @app.post("/sync/{category}")
@@ -40,3 +40,7 @@ async def random_movie(
         is_animated=is_animated,
         _type=_type,
     )
+
+@app.get("/meta")
+async def meta():
+    return await get_meta_info()
