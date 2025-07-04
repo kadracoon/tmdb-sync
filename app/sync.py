@@ -1,12 +1,15 @@
 from datetime import datetime
 
 import httpx
+from httpx import HTTPStatusError
 from app.config import settings
+from app.logging import logger
 from app.mongo import movies_collection
+from app.mongo import sync_errors_collection
 from app.tmdb_client import fetch_category, fetch_tv_category, fetch_best_frames, fetch_discover_movies
 
 
-async def fetch_title_ru(item_id: int, content_type: str = "movie") -> str | None:
+async def fetch_title_ru(item_id: int, content_type: str = "movie") -> dict:
     """Получить локализованный заголовок для фильма или сериала"""
     try:
         async with httpx.AsyncClient() as client:
@@ -17,9 +20,25 @@ async def fetch_title_ru(item_id: int, content_type: str = "movie") -> str | Non
             response.raise_for_status()
             data = response.json()
             return data.get("title") or data.get("name")
+    except HTTPStatusError as e:
+        logger.error(f"TMDB API error: {e.response.status_code} on {e.request.url}")
+        await sync_errors_collection.insert_one({
+            "endpoint": e.request.url.path,
+            "url": str(e.request.url),
+            "status_code": e.response.status_code,
+            "params": dict(e.request.url.params),
+            "response_text": e.response.text,
+            "timestamp": datetime.utcnow()
+        })
+        return {}
     except Exception as e:
-        print(f"Failed to fetch localized title for {content_type} {item_id}: {e}")
-        return None
+        logger.exception("Unexpected error during TMDB fetch")
+        await sync_errors_collection.insert_one({
+            "endpoint": "unknown",
+            "error": str(e),
+            "timestamp": datetime.utcnow()
+        })
+        return {}
 
 
 def enrich_common_fields(item: dict, content_type: str, category: str) -> dict:
