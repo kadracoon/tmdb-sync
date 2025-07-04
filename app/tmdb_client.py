@@ -126,3 +126,17 @@ async def fetch_discover_movies(page: int = 1) -> dict:
         )
         resp.raise_for_status()
         return resp.json()
+
+
+async def fetch_details(item_id: int, content_type: str = "movie") -> dict:
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{BASE_URL}/{content_type}/{item_id}",
+                params={"api_key": settings.tmdb_api_key, "language": "en-US"},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        logger.exception(f"Failed to fetch {content_type} details for {item_id}: {e}")
+        return {}
