@@ -6,7 +6,7 @@ from app.config import settings
 from app.logging import logger
 from app.mongo import movies_collection
 from app.mongo import sync_errors_collection
-from app.tmdb_client import fetch_category, fetch_tv_category, fetch_best_frames, fetch_discover_movies
+from app.tmdb_client import fetch_category, fetch_tv_category, fetch_best_frames, fetch_discover_movies, fetch_details
 
 
 async def fetch_title_ru(item_id: int, content_type: str = "movie") -> dict:
@@ -59,9 +59,15 @@ async def sync_category(category: str):
     results = data.get("results", [])
 
     for movie in results:
+        details = await fetch_details(movie["id"], "movie")
+        if not details:
+            continue
+        movie["production_countries"] = details.get("production_countries", [])
+
         movie = enrich_common_fields(movie, "movie", category)
         movie["title_ru"] = await fetch_title_ru(movie["id"], "movie")
         frames = await fetch_best_frames(movie["id"], "movie")
+
         if not frames:
             continue
 
@@ -82,6 +88,11 @@ async def sync_tv_category(category: str):
     results = data.get("results", [])
 
     for tv in results:
+        details = await fetch_details(tv["id"], "tv")
+        if not details:
+            continue
+        tv["production_countries"] = details.get("production_countries", [])
+
         tv = enrich_common_fields(tv, "tv", category)
         tv["title_ru"] = await fetch_title_ru(tv["id"], "tv")
         frames = await fetch_best_frames(tv["id"], "tv")
@@ -107,11 +118,18 @@ async def sync_discover_movies(pages: int = 1):
             results = data.get("results", [])
 
             for movie in results:
+
+                details = await fetch_details(movie["id"], "movie")
+                if not details:
+                    continue
+
+                movie["production_countries"] = details.get("production_countries", [])
+
                 movie = enrich_common_fields(movie, "movie", "discover")
                 movie["title_ru"] = await fetch_title_ru(movie["id"], "movie")
-                movie["frame_url"] = await fetch_best_frames(movie["id"], "movie")
+                movie["frames"] = await fetch_best_frames(movie["id"], "movie")
 
-                if not movie["frame_url"]:
+                if not movie["frames"]:
                     continue
 
                 await movies_collection.update_one(
