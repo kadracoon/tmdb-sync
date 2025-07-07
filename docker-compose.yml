@@ -6,6 +6,8 @@ services:
       - "27017:27017"
     volumes:
       - mongo_data:/data/db
+    networks:
+      - kadracoon-net
 
   web:
     build:
@@ -20,6 +22,12 @@ services:
       - .env
     depends_on:
       - mongo
+    networks:
+      - kadracoon-net
 
 volumes:
   mongo_data:
+
+networks:
+  kadracoon-net:
+    external: true
