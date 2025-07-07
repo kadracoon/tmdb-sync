@@ -2,7 +2,7 @@ from typing import Literal
 
 from fastapi import FastAPI, Query
 
-from app.endpoints import reports
+from app.endpoints import reports, games
 from app.meta import get_meta_info
 from app.scheduler import start_scheduler
 from app.sync import sync_category, sync_discover_movies
@@ -11,6 +11,7 @@ from app.query import get_random_movie
 
 app = FastAPI()
 app.include_router(reports.router)
+app.include_router(games.router)
 
 
 @app.on_event("startup")
