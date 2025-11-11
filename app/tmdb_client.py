@@ -137,7 +137,7 @@ async def fetch_discover_movies(page: int = 1) -> dict:
                 "api_key": settings.tmdb_api_key,
                 "language": "en-US",
                 "include_adult": False,
-                "sort_by": "popularity.desc",
+                "sort_by": "vote_count.desc",
                 "release_date.gte": "1900-01-01",
                 "release_date.lte": "2025-12-31",
                 "page": page,
