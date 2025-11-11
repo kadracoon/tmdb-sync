@@ -20,3 +20,6 @@ async def ensure_indexes() -> None:
     await movies_collection.create_index([("release_date", 1)])
     await movies_collection.create_index([("year", 1)])
     await movies_collection.create_index([("frames.path", 1)])
+    await frame_reports_collection.create_index([("movie_id", 1)])
+    await frame_reports_collection.create_index([("path", 1)])
+    await frame_reports_collection.create_index([("timestamp", -1)])

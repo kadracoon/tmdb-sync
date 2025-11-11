@@ -2,7 +2,7 @@ from typing import Literal
 
 from fastapi import FastAPI, Query
 
-from app.endpoints import reports
+from app.endpoints import frames, reports
 from app.query import get_random_movie
 from app.meta import get_meta_info
 from app.mongo import ensure_indexes, sync_cursors_collection
@@ -12,6 +12,7 @@ from app.sync_top import sync_top_by_vote_count
 
 
 app = FastAPI()
+app.include_router(frames.router)
 app.include_router(reports.router)
 
 
