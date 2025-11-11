@@ -2,6 +2,7 @@ from datetime import datetime
 
 import httpx
 from httpx import HTTPStatusError
+from app.catalog.upsert import upsert_movie
 from app.config import settings
 from app.logging import logger
 from app.mongo import movies_collection
@@ -72,12 +73,7 @@ async def sync_category(category: str):
             continue
 
         movie["frames"] = frames
-
-        await movies_collection.update_one(
-            {"id": movie["id"], "_type": "movie"},
-            {"$set": movie},
-            upsert=True
-        )
+        await upsert_movie(movie)
 
     return {"inserted_or_updated": len(results), "type": "movie", "category": category}
 
@@ -96,16 +92,12 @@ async def sync_tv_category(category: str):
         tv = enrich_common_fields(tv, "tv", category)
         tv["title_ru"] = await fetch_title_ru(tv["id"], "tv")
         frames = await fetch_best_frames(tv["id"], "tv")
+
         if not frames:
             continue
 
         tv["frames"] = frames
-
-        await movies_collection.update_one(
-            {"id": tv["id"], "_type": "tv"},
-            {"$set": tv},
-            upsert=True
-        )
+        await upsert_movie(tv)
 
     return {"inserted_or_updated": len(results), "type": "tv", "category": category}
 
@@ -118,7 +110,6 @@ async def sync_discover_movies(pages: int = 1):
             results = data.get("results", [])
 
             for movie in results:
-
                 details = await fetch_details(movie["id"], "movie")
                 if not details:
                     continue
@@ -132,11 +123,7 @@ async def sync_discover_movies(pages: int = 1):
                 if not movie["frames"]:
                     continue
 
-                await movies_collection.update_one(
-                    {"id": movie["id"], "_type": "movie"},
-                    {"$set": movie},
-                    upsert=True
-                )
+                await upsert_movie(movie)
                 total += 1
 
         except Exception as e:

@@ -51,43 +51,53 @@ async def fetch_tv_category(category: str, page: int = 1):
         return {}
 
 
-async def fetch_best_frames(item_id: int, content_type: str = "movie", limit: int = 5) -> list[dict]:
-    """Возвращает до `limit` лучших кадров с допустимым соотношением сторон"""
+async def fetch_backdrops(item_id: int, content_type: str = "movie") -> list[dict]:
+    """
+    Возвращает ВСЕ backdrops (НЕ постеры) для фильма/сериала.
+    Формат элемента: {path, aspect_ratio, vote_average, width}
+    Отфильтрованы по разумному AR и отсортированы по (vote_average desc, width desc).
+    """
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(
                 f"{BASE_URL}/{content_type}/{item_id}/images",
-                params={"api_key": settings.tmdb_api_key}
+                params={
+                    "api_key": settings.tmdb_api_key,
+                    # расширяем языки, чтобы не терять кадры
+                    "include_image_language": "null,en,ru"
+                }
             )
             resp.raise_for_status()
             data = resp.json()
-            backdrops = data.get("backdrops", [])
-            if not backdrops:
-                return []
 
-            def is_valid(b):
-                ar = b.get("aspect_ratio", 0)
-                return 1.6 <= ar <= 1.85 and b.get("vote_average", 0) >= 3
+        backdrops = data.get("backdrops", []) or []
+        if not backdrops:
+            return []
 
-            filtered = list(filter(is_valid, backdrops))
-            if not filtered:
-                return []
+        def is_valid(b: dict) -> bool:
+            # мягкий фильтр: кадры кинематографического формата и не совсем низкооценённые
+            ar = b.get("aspect_ratio", 0) or 0
+            return 1.5 <= ar <= 2.2 and (b.get("vote_average") or 0) >= 0
 
-            sorted_frames = sorted(
-                filtered,
-                key=lambda b: (b["vote_average"], b["width"]),
-                reverse=True
-            )[:limit]
+        frames = []
+        seen = set()
+        for b in backdrops:
+            if not is_valid(b):
+                continue
+            path = b.get("file_path")
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            frames.append({
+                "path": path,
+                "aspect_ratio": b.get("aspect_ratio"),
+                "vote_average": b.get("vote_average") or 0,
+                "width": b.get("width"),
+            })
 
-            return [
-                {
-                    "path": f["file_path"],
-                    "aspect_ratio": f["aspect_ratio"],
-                    "vote_average": f["vote_average"],
-                    "width": f["width"]
-                }
-                for f in sorted_frames
-            ]
+        # сортируем по качеству: сначала оценка кадра, потом ширина
+        frames.sort(key=lambda f: (f.get("vote_average", 0) or 0, f.get("width", 0) or 0), reverse=True)
+        return frames
 
     except HTTPStatusError as e:
         logger.error(f"TMDB frame API error: {e.response.status_code} on {e.request.url}")
@@ -110,6 +120,15 @@ async def fetch_best_frames(item_id: int, content_type: str = "movie", limit: in
     return []
 
 
+async def fetch_best_frames(item_id: int, content_type: str = "movie", limit: int = 5) -> list[dict]:
+    """
+    DEPRECATED: возвращает теперь ВСЕ backdrops (лимит игнорируется).
+    Оставлено для обратной совместимости с существующими вызовами.
+    """
+    return await fetch_backdrops(item_id, content_type)
+
+
+
 async def fetch_discover_movies(page: int = 1) -> dict:
     async with httpx.AsyncClient() as client:
         resp = await client.get(
@@ -119,7 +138,7 @@ async def fetch_discover_movies(page: int = 1) -> dict:
                 "language": "en-US",
                 "include_adult": False,
                 "sort_by": "popularity.desc",
-                "release_date.gte": "1980-01-01",
+                "release_date.gte": "1900-01-01",
                 "release_date.lte": "2025-12-31",
                 "page": page,
             }

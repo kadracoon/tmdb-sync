@@ -11,7 +11,7 @@ async def get_random_movie(
     is_animated: bool | None,
     _type: str | None,
 ):
-    query = {"frame_url": {"$exists": True}}
+    query = {"frames": {"$exists": True, "$ne": []}}
 
     print("MongoDB query:", query)
 

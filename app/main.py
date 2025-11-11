@@ -2,21 +2,23 @@ from typing import Literal
 
 from fastapi import FastAPI, Query
 
-from app.endpoints import reports, movies
+from app.endpoints import reports
 from app.meta import get_meta_info
 from app.scheduler import start_scheduler
 from app.sync import sync_category, sync_discover_movies
 from app.query import get_random_movie
+from app.mongo import ensure_indexes
 
 
 app = FastAPI()
 app.include_router(reports.router)
 # app.include_router(games.router)
-app.include_router(movies.router)
+# app.include_router(movies.router)
 
 
 @app.on_event("startup")
 async def startup_event():
+    await ensure_indexes()
     start_scheduler()
 
 
