@@ -2,7 +2,7 @@ from typing import Literal
 
 from fastapi import FastAPI, Query
 
-from app.endpoints import frames, meta_sync, reports
+from app.endpoints import frames, meta_sync, movies, reports
 # from app.query import get_random_movie
 # from app.meta import get_meta_info
 from app.mongo import ensure_indexes, sync_cursors_collection
@@ -17,6 +17,7 @@ app = FastAPI()
 app.include_router(frames.router)
 app.include_router(reports.router)
 app.include_router(meta_sync.router)
+app.include_router(movies.router)
 
 
 @app.on_event("startup")
