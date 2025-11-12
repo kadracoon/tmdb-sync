@@ -7,7 +7,7 @@ from app.logging import logger
 from app.mongo import movies_collection, sync_cursors_collection, sync_errors_collection
 from app.catalog.upsert import upsert_movie
 from app.sync import enrich_common_fields, fetch_title_ru, fetch_details
-from app.tmdb_client import fetch_backdrops
+from app.tmdb_client import fetch_backdrops, TMDB_TIMEOUT
 
 
 MAX_PAGES = 500
@@ -53,7 +53,7 @@ async def _fetch_discover_year_page(year: int, page: int, content_type: str = "m
             "first_air_date.lte": f"{year}-12-31",
         })
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
         r = await client.get(f"https://api.themoviedb.org/3/discover/{base}", params=params)
         r.raise_for_status()
         return r.json()

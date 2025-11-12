@@ -7,13 +7,13 @@ from app.config import settings
 from app.logging import logger
 from app.mongo import movies_collection
 from app.mongo import sync_errors_collection
-from app.tmdb_client import fetch_category, fetch_tv_category, fetch_best_frames, fetch_discover_movies, fetch_details
+from app.tmdb_client import fetch_category, fetch_tv_category, fetch_best_frames, fetch_discover_movies, fetch_details, TMDB_TIMEOUT
 
 
 async def fetch_title_ru(item_id: int, content_type: str = "movie") -> dict:
     """Получить локализованный заголовок для фильма или сериала"""
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
             response = await client.get(
                 f"https://api.themoviedb.org/3/{content_type}/{item_id}",
                 params={"api_key": settings.tmdb_api_key, "language": "ru-RU"}

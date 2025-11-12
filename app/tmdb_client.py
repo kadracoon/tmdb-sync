@@ -9,10 +9,11 @@ from app.mongo import sync_errors_collection
 
 BASE_URL = "https://api.themoviedb.org/3"
 IMAGE_CDN = "https://image.tmdb.org/t/p/"
+TMDB_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 
 async def fetch_category(category: str, page: int = 1):
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
         resp = await client.get(
             f"{BASE_URL}/movie/{category}",
             params={"api_key": settings.tmdb_api_key, "language": "en-US", "page": page}
@@ -23,7 +24,7 @@ async def fetch_category(category: str, page: int = 1):
 
 async def fetch_tv_category(category: str, page: int = 1):
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
             resp = await client.get(
                 f"{BASE_URL}/tv/{category}",
                 params={"api_key": settings.tmdb_api_key, "language": "en-US", "page": page}
@@ -58,7 +59,7 @@ async def fetch_backdrops(item_id: int, content_type: str = "movie") -> list[dic
     Отфильтрованы по разумному AR и отсортированы по (vote_average desc, width desc).
     """
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
             resp = await client.get(
                 f"{BASE_URL}/{content_type}/{item_id}/images",
                 params={
@@ -130,7 +131,7 @@ async def fetch_best_frames(item_id: int, content_type: str = "movie", limit: in
 
 
 async def fetch_discover_movies(page: int = 1) -> dict:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
         resp = await client.get(
             f"{BASE_URL}/discover/movie",
             params={
@@ -149,7 +150,7 @@ async def fetch_discover_movies(page: int = 1) -> dict:
 
 async def fetch_details(item_id: int, content_type: str = "movie") -> dict:
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
             resp = await client.get(
                 f"{BASE_URL}/{content_type}/{item_id}",
                 params={"api_key": settings.tmdb_api_key, "language": "en-US"},

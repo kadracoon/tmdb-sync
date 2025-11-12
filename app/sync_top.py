@@ -12,7 +12,7 @@ from app.mongo import (
 )
 from app.catalog.upsert import upsert_movie
 from app.sync import enrich_common_fields, fetch_title_ru
-from app.tmdb_client import fetch_backdrops
+from app.tmdb_client import fetch_backdrops, TMDB_TIMEOUT
 
 
 CURSOR_KEY = "top_vote_count_movie"  # ключ для прогресса
@@ -29,7 +29,7 @@ async def _save_cursor(cur: dict):
 
 
 async def _fetch_discover_vote_count(page: int) -> dict:
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
         r = await client.get(
             "https://api.themoviedb.org/3/discover/movie",
             params={
@@ -88,7 +88,7 @@ async def sync_top_by_vote_count(limit: int = 10000, resume: bool = True, start_
 
             try:
                 # детали
-                async with httpx.AsyncClient(timeout=30) as client:
+                async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
                     details = await client.get(
                         f"https://api.themoviedb.org/3/movie/{movie['id']}",
                         params={"api_key": settings.tmdb_api_key, "language": "en-US"},
