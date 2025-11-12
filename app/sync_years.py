@@ -29,9 +29,16 @@ async def _save_cursor(cur: dict):
     await sync_cursors_collection.update_one({"key": cur["key"]}, {"$set": cur}, upsert=True)  # type: ignore
 
 
-async def _fetch_discover_year_page(year: int, page: int, content_type: str = "movie", sort_by: str = "popularity.desc") -> dict:
-    # берём discover по году. Для фильмов используем primary_release_date.*,
-    # для сериалов — first_air_date.* (если захочешь поддержать "tv")
+async def _fetch_discover_year_page(
+    year: int,
+    page: int,
+    content_type: str = "movie",
+    sort_by: str = "popularity.desc",
+) -> dict | None:
+    """
+    Возвращает JSON discover-страницы или None,
+    если после нескольких попыток TMDB так и не ответил.
+    """
     base = "movie" if content_type == "movie" else "tv"
     params = {
         "api_key": settings.tmdb_api_key,
@@ -53,10 +60,90 @@ async def _fetch_discover_year_page(year: int, page: int, content_type: str = "m
             "first_air_date.lte": f"{year}-12-31",
         })
 
-    async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
-        r = await client.get(f"https://api.themoviedb.org/3/discover/{base}", params=params)
-        r.raise_for_status()
-        return r.json()
+    max_attempts = 5
+    last_exc: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
+                r = await client.get(
+                    f"https://api.themoviedb.org/3/discover/{base}",
+                    params=params,
+                )
+                r.raise_for_status()
+                return r.json()
+
+        except HTTPStatusError as e:
+            # TMDB вернул 4xx/5xx — ретраи обычно бессмысленны
+            logger.error(
+                "TMDB discover HTTP error %s %s (year=%s page=%s)",
+                e.response.status_code,
+                e.request.url,
+                year,
+                page,
+            )
+            await sync_errors_collection.insert_one({
+                "endpoint": e.request.url.path,
+                "url": str(e.request.url),
+                "status_code": e.response.status_code,
+                "params": dict(e.request.url.params),
+                "response_text": e.response.text,
+                "year": year,
+                "page": page,
+                "timestamp": datetime.utcnow(),
+            })
+            return None
+
+        except (ConnectError, ReadTimeout) as e:
+            last_exc = e
+            logger.warning(
+                "TMDB discover network error (year=%s page=%s) attempt %s/%s: %r",
+                year,
+                page,
+                attempt,
+                max_attempts,
+                e,
+            )
+            if attempt == max_attempts:
+                await sync_errors_collection.insert_one({
+                    "endpoint": f"/discover/{base}",
+                    "year": year,
+                    "page": page,
+                    "error": f"network error after {max_attempts} attempts: {repr(e)}",
+                    "timestamp": datetime.utcnow(),
+                })
+                return None
+            await asyncio.sleep(attempt)
+
+        except Exception as e:
+            last_exc = e
+            logger.exception(
+                "Unexpected error in discover (year=%s page=%s) attempt %s/%s",
+                year,
+                page,
+                attempt,
+                max_attempts,
+            )
+            if attempt == max_attempts:
+                await sync_errors_collection.insert_one({
+                    "endpoint": f"/discover/{base}",
+                    "year": year,
+                    "page": page,
+                    "error": f"unexpected error after {max_attempts} attempts: {repr(e)}",
+                    "timestamp": datetime.utcnow(),
+                })
+                return None
+            await asyncio.sleep(attempt)
+
+    # теоретически сюда не дойдём, но на всякий
+    logger.error(
+        "TMDB discover year=%s page=%s failed after %s attempts: %r",
+        year,
+        page,
+        max_attempts,
+        last_exc,
+    )
+    return None
 
 
 async def sync_years(
@@ -93,27 +180,20 @@ async def sync_years(
         processed_year = 0
 
         while page <= MAX_PAGES and processed_total < limit:
-            try:
-                data = await _fetch_discover_year_page(year, page, content_type=content_type, sort_by=sort_by)
-            except HTTPStatusError as e:
-                logger.error("TMDB discover error %s %s", e.response.status_code, e.request.url)
-                await sync_errors_collection.insert_one({
-                    "endpoint": e.request.url.path,
-                    "url": str(e.request.url),
-                    "status_code": e.response.status_code,
-                    "params": dict(e.request.url.params),
-                    "response_text": e.response.text,
-                    "timestamp": datetime.utcnow(),
-                })
-                break
-            except Exception as e:
-                logger.exception("discover fatal at page %s (year=%s)", page, year)
-                await sync_errors_collection.insert_one({
-                    "endpoint": "discover/year",
-                    "year": year,
-                    "error": str(e),
-                    "timestamp": datetime.utcnow(),
-                })
+            data = await _fetch_discover_year_page(
+                year,
+                page,
+                content_type=content_type,
+                sort_by=sort_by,
+            )
+
+            if data is None:
+                # _fetch_discover_year_page уже всё залогировал и записал в sync_errors
+                logger.error(
+                    "Stopping year=%s at page=%s due to repeated TMDB errors",
+                    year,
+                    page,
+                )
                 break
 
             results = data.get("results") or []

@@ -1,6 +1,7 @@
+import asyncio
 from datetime import datetime
 import httpx
-from httpx import HTTPStatusError
+from httpx import HTTPStatusError, ConnectError, ReadTimeout
 
 from app.config import settings
 from app.logging import logger
@@ -28,21 +29,96 @@ async def _save_cursor(cur: dict):
     await sync_cursors_collection.update_one({"key": CURSOR_KEY}, {"$set": cur}, upsert=True)  # type: ignore
 
 
-async def _fetch_discover_vote_count(page: int) -> dict:
-    async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
-        r = await client.get(
-            "https://api.themoviedb.org/3/discover/movie",
-            params={
-                "api_key": settings.tmdb_api_key,
-                "language": "en-US",
-                "include_adult": False,
-                "include_video": False,
-                "sort_by": "vote_count.desc",
+async def _fetch_discover_vote_count(page: int) -> dict | None:
+    """
+    Топ по vote_count, с ретраями.
+    Возвращает JSON или None, если после нескольких попыток так и не удалось достучаться.
+    """
+    params = {
+        "api_key": settings.tmdb_api_key,
+        "language": "en-US",
+        "include_adult": False,
+        "include_video": False,
+        "sort_by": "vote_count.desc",
+        "page": page,
+    }
+
+    max_attempts = 5
+    last_exc: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
+                r = await client.get(
+                    "https://api.themoviedb.org/3/discover/movie",
+                    params=params,
+                )
+                r.raise_for_status()
+                return r.json()
+
+        except HTTPStatusError as e:
+            # TMDB ответил 4xx/5xx — ретраи мало помогут
+            logger.error(
+                "TMDB discover(top-votes) HTTP error %s %s page=%s",
+                e.response.status_code,
+                e.request.url,
+                page,
+            )
+            await sync_errors_collection.insert_one({
+                "endpoint": e.request.url.path,
+                "url": str(e.request.url),
+                "status_code": e.response.status_code,
+                "params": dict(e.request.url.params),
+                "response_text": e.response.text,
                 "page": page,
-            },
-        )
-        r.raise_for_status()
-        return r.json()
+                "timestamp": datetime.utcnow(),
+            })
+            return None
+
+        except (ConnectError, ReadTimeout) as e:
+            last_exc = e
+            logger.warning(
+                "TMDB discover(top-votes) network error page=%s attempt %s/%s: %r",
+                page,
+                attempt,
+                max_attempts,
+                e,
+            )
+            if attempt == max_attempts:
+                await sync_errors_collection.insert_one({
+                    "endpoint": "/discover/movie",
+                    "page": page,
+                    "error": f"network error after {max_attempts} attempts: {repr(e)}",
+                    "timestamp": datetime.utcnow(),
+                })
+                return None
+            await asyncio.sleep(attempt)
+
+        except Exception as e:
+            last_exc = e
+            logger.exception(
+                "Unexpected error in discover(top-votes) page=%s attempt %s/%s",
+                page,
+                attempt,
+                max_attempts,
+            )
+            if attempt == max_attempts:
+                await sync_errors_collection.insert_one({
+                    "endpoint": "/discover/movie",
+                    "page": page,
+                    "error": f"unexpected error after {max_attempts} attempts: {repr(e)}",
+                    "timestamp": datetime.utcnow(),
+                })
+                return None
+            await asyncio.sleep(attempt)
+
+    logger.error(
+        "TMDB discover(top-votes) page=%s failed after %s attempts: %r",
+        page,
+        max_attempts,
+        last_exc,
+    )
+    return None
 
 
 async def sync_top_by_vote_count(limit: int = 10000, resume: bool = True, start_page: int | None = None) -> dict:
@@ -54,26 +130,14 @@ async def sync_top_by_vote_count(limit: int = 10000, resume: bool = True, start_
     updated = 0
 
     while True:
-        try:
-            data = await _fetch_discover_vote_count(page)
-        except HTTPStatusError as e:
-            logger.error("TMDB discover error %s %s", e.response.status_code, e.request.url)
-            await sync_errors_collection.insert_one({
-                "endpoint": e.request.url.path,
-                "url": str(e.request.url),
-                "status_code": e.response.status_code,
-                "params": dict(e.request.url.params),
-                "response_text": e.response.text,
-                "timestamp": datetime.utcnow(),
-            })
-            break
-        except Exception as e:
-            logger.exception("discover fatal at page %s", page)
-            await sync_errors_collection.insert_one({
-                "endpoint": "discover/movie",
-                "error": str(e),
-                "timestamp": datetime.utcnow(),
-            })
+        data = await _fetch_discover_vote_count(page)
+
+        if data is None:
+            # _fetch_discover_vote_count уже всё залогировал в sync_errors
+            logger.error(
+                "Stopping sync_top_by_vote_count at page=%s due to TMDB errors",
+                page,
+            )
             break
 
         results = data.get("results") or []
