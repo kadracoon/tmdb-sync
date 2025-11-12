@@ -50,9 +50,11 @@ async def upsert_movie(doc: Dict[str, Any]) -> None:
     - сохраняем/не перетираем incorrect_frames
     - считаем backdrop_path по валидным кадрам
     - created_at только на insert, synced_at всегда
+    - отмечаем время последнего синка по типу сортировки (popularity/vote_count)
     """
 
     doc = dict(doc)
+
     # нормализация фреймов
     doc["frames"] = _normalize_frames(doc.get("frames"))
 
@@ -65,19 +67,37 @@ async def upsert_movie(doc: Dict[str, Any]) -> None:
 
     doc["synced_at"] = datetime.utcnow()
 
-    # подмешиваем уже существующие вручную отметки и только потом считаем backdrop
-    existing = await movies_collection.find_one({"id": doc["id"], "_type": doc.get("_type", "movie")}, {"incorrect_frames": 1})
-    if existing and "incorrect_frames" in existing:
-        doc["incorrect_frames"] = existing["incorrect_frames"]
+    # извлечём sort_by (если есть) — чтобы знать тип синка
+    sort_by = doc.get("_sort_by") or doc.get("sort_by")
 
+    # подмешиваем уже существующие вручную отметки и только потом считаем backdrop
+    existing = await movies_collection.find_one(
+        {"id": doc["id"], "_type": doc.get("_type", "movie")},
+        {"incorrect_frames": 1, "backdrop_path": 1}
+    )
+
+    if existing:
+        # сохраняем ручные пометки
+        if "incorrect_frames" in existing:
+            doc["incorrect_frames"] = existing["incorrect_frames"]
+        # если backdrop_path уже был — не затираем без надобности
+        if "backdrop_path" in existing and not doc.get("backdrop_path"):
+            doc["backdrop_path"] = existing["backdrop_path"]
+
+    # пересчёт валидного кадра
     doc["backdrop_path"] = pick_backdrop(doc)
+
+    # выставляем метки синхронизации в зависимости от типа
+    update_fields = {"$set": doc, "$setOnInsert": {"created_at": datetime.utcnow()}}
+
+    if sort_by == "popularity.desc":
+        update_fields["$set"]["last_popularity_sync_at"] = datetime.utcnow()
+    elif sort_by == "vote_count.desc":
+        update_fields["$set"]["last_vote_count_sync_at"] = datetime.utcnow()
 
     # апсёрт
     await movies_collection.update_one(
         {"id": doc["id"], "_type": doc.get("_type", "movie")},
-        {
-            "$set": doc,
-            "$setOnInsert": {"created_at": datetime.utcnow()}
-        },
+        update_fields,
         upsert=True
     )
