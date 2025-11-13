@@ -143,23 +143,18 @@ async def fetch_backdrops(item_id: int, content_type: str = "movie") -> list[dic
     Возвращает ВСЕ backdrops (НЕ постеры) для фильма/сериала.
     Формат элемента: {path, aspect_ratio, vote_average, width}
     Отфильтрованы по разумному AR и отсортированы по (vote_average desc, width desc).
-
-    ВАЖНО: при любых ошибках TMDB возвращает [] и логирует в sync_errors_collection.
     """
-    params = {
-        "api_key": settings.tmdb_api_key,
-        "include_image_language": "null,en,ru",
-    }
-
-    max_attempts = 5
-    last_exc: Exception | None = None
+    max_attempts = 3
 
     for attempt in range(1, max_attempts + 1):
         try:
             async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
                 resp = await client.get(
                     f"{BASE_URL}/{content_type}/{item_id}/images",
-                    params=params,
+                    params={
+                        "api_key": settings.tmdb_api_key,
+                        "include_image_language": "null,en,ru",
+                    },
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -170,12 +165,10 @@ async def fetch_backdrops(item_id: int, content_type: str = "movie") -> list[dic
 
             def is_valid(b: dict) -> bool:
                 ar = b.get("aspect_ratio", 0) or 0
-                # мягкий фильтр: кадры кинематографического формата и не совсем низкооценённые
                 return 1.5 <= ar <= 2.2 and (b.get("vote_average") or 0) >= 0
 
             frames: list[dict] = []
             seen: set[str] = set()
-
             for b in backdrops:
                 if not is_valid(b):
                     continue
@@ -200,13 +193,12 @@ async def fetch_backdrops(item_id: int, content_type: str = "movie") -> list[dic
             return frames
 
         except HTTPStatusError as e:
-            # 4xx/5xx — ретраи особо не помогут, логируем и выходим
             logger.error(
-                "TMDB frame API HTTP error %s %s (%s %s)",
-                e.response.status_code,
-                e.request.url,
+                "TMDB %s frames HTTP error %s for id=%s: %s",
                 content_type,
+                e.response.status_code,
                 item_id,
+                e.request.url,
             )
             await sync_errors_collection.insert_one({
                 "endpoint": e.request.url.path,
@@ -214,16 +206,15 @@ async def fetch_backdrops(item_id: int, content_type: str = "movie") -> list[dic
                 "status_code": e.response.status_code,
                 "params": dict(e.request.url.params),
                 "response_text": e.response.text,
-                "content_type": content_type,
                 "item_id": item_id,
+                "content_type": content_type,
                 "timestamp": datetime.utcnow(),
             })
             return []
 
         except (ConnectError, ReadTimeout) as e:
-            last_exc = e
             logger.warning(
-                "TMDB frame API network error (%s %s) attempt %s/%s: %r",
+                "TMDB %s frames network error (id=%s) attempt %s/%s: %r",
                 content_type,
                 item_id,
                 attempt,
@@ -233,8 +224,8 @@ async def fetch_backdrops(item_id: int, content_type: str = "movie") -> list[dic
             if attempt == max_attempts:
                 await sync_errors_collection.insert_one({
                     "endpoint": f"/{content_type}/{item_id}/images",
-                    "content_type": content_type,
                     "item_id": item_id,
+                    "content_type": content_type,
                     "error": f"network error after {max_attempts} attempts: {repr(e)}",
                     "timestamp": datetime.utcnow(),
                 })
@@ -242,9 +233,8 @@ async def fetch_backdrops(item_id: int, content_type: str = "movie") -> list[dic
             await asyncio.sleep(attempt)
 
         except Exception as e:
-            last_exc = e
             logger.exception(
-                "Unexpected error in fetch_backdrops(%s %s) attempt %s/%s",
+                "Unexpected error fetching %s frames for id=%s (attempt %s/%s)",
                 content_type,
                 item_id,
                 attempt,
@@ -253,23 +243,15 @@ async def fetch_backdrops(item_id: int, content_type: str = "movie") -> list[dic
             if attempt == max_attempts:
                 await sync_errors_collection.insert_one({
                     "endpoint": f"/{content_type}/{item_id}/images",
-                    "content_type": content_type,
                     "item_id": item_id,
+                    "content_type": content_type,
                     "error": f"unexpected error after {max_attempts} attempts: {repr(e)}",
                     "timestamp": datetime.utcnow(),
                 })
                 return []
             await asyncio.sleep(attempt)
 
-    logger.error(
-        "fetch_backdrops(%s %s) failed after %s attempts: %r",
-        content_type,
-        item_id,
-        max_attempts,
-        last_exc,
-    )
     return []
-
 
 
 async def fetch_best_frames(item_id: int, content_type: str = "movie", limit: int = 5) -> list[dict]:
@@ -278,7 +260,6 @@ async def fetch_best_frames(item_id: int, content_type: str = "movie", limit: in
     Оставлено для обратной совместимости с существующими вызовами.
     """
     return await fetch_backdrops(item_id, content_type)
-
 
 
 async def fetch_discover_movies(page: int = 1) -> dict:
@@ -375,34 +356,29 @@ async def fetch_discover_movies(page: int = 1) -> dict:
 
 async def fetch_details(item_id: int, content_type: str = "movie") -> dict:
     """
-    Детали фильма/сериала (без ретраев по HTTP 4xx/5xx, с ретраями по сетевым ошибкам).
-    При фейле возвращает {}.
+    Детали фильма/сериала с мягкими ретраями.
+    При сетевых ошибках делаем несколько попыток, потом возвращаем {}.
     """
-    params = {
-        "api_key": settings.tmdb_api_key,
-        "language": "en-US",
-    }
-
     max_attempts = 3
-    last_exc: Exception | None = None
 
     for attempt in range(1, max_attempts + 1):
         try:
             async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
                 resp = await client.get(
                     f"{BASE_URL}/{content_type}/{item_id}",
-                    params=params,
+                    params={"api_key": settings.tmdb_api_key, "language": "en-US"},
                 )
                 resp.raise_for_status()
                 return resp.json()
 
         except HTTPStatusError as e:
+            # 4xx/5xx — ретраи обычно не спасут, просто логируем и выходим
             logger.error(
-                "TMDB details HTTP error %s %s (%s %s)",
-                e.response.status_code,
-                e.request.url,
+                "TMDB %s details HTTP error %s for id=%s: %s",
                 content_type,
+                e.response.status_code,
                 item_id,
+                e.request.url,
             )
             await sync_errors_collection.insert_one({
                 "endpoint": e.request.url.path,
@@ -410,16 +386,15 @@ async def fetch_details(item_id: int, content_type: str = "movie") -> dict:
                 "status_code": e.response.status_code,
                 "params": dict(e.request.url.params),
                 "response_text": e.response.text,
-                "content_type": content_type,
                 "item_id": item_id,
+                "content_type": content_type,
                 "timestamp": datetime.utcnow(),
             })
             return {}
 
         except (ConnectError, ReadTimeout) as e:
-            last_exc = e
             logger.warning(
-                "TMDB details network error (%s %s) attempt %s/%s: %r",
+                "TMDB %s details network error (id=%s) attempt %s/%s: %r",
                 content_type,
                 item_id,
                 attempt,
@@ -429,18 +404,17 @@ async def fetch_details(item_id: int, content_type: str = "movie") -> dict:
             if attempt == max_attempts:
                 await sync_errors_collection.insert_one({
                     "endpoint": f"/{content_type}/{item_id}",
-                    "content_type": content_type,
                     "item_id": item_id,
+                    "content_type": content_type,
                     "error": f"network error after {max_attempts} attempts: {repr(e)}",
                     "timestamp": datetime.utcnow(),
                 })
                 return {}
-            await asyncio.sleep(attempt)
+            await asyncio.sleep(attempt)  # 1, 2, 3 секунды
 
         except Exception as e:
-            last_exc = e
             logger.exception(
-                "Unexpected error in fetch_details(%s %s) attempt %s/%s",
+                "Unexpected error fetching %s details for id=%s (attempt %s/%s)",
                 content_type,
                 item_id,
                 attempt,
@@ -449,19 +423,13 @@ async def fetch_details(item_id: int, content_type: str = "movie") -> dict:
             if attempt == max_attempts:
                 await sync_errors_collection.insert_one({
                     "endpoint": f"/{content_type}/{item_id}",
-                    "content_type": content_type,
                     "item_id": item_id,
+                    "content_type": content_type,
                     "error": f"unexpected error after {max_attempts} attempts: {repr(e)}",
                     "timestamp": datetime.utcnow(),
                 })
                 return {}
             await asyncio.sleep(attempt)
 
-    logger.error(
-        "fetch_details(%s %s) failed after %s attempts: %r",
-        content_type,
-        item_id,
-        max_attempts,
-        last_exc,
-    )
+    # теоретически сюда не дойдём
     return {}

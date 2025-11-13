@@ -1,6 +1,7 @@
 from typing import Literal
 
-from fastapi import FastAPI, Query
+from fastapi import BackgroundTasks, FastAPI, Query
+from pydantic import BaseModel
 
 from app.endpoints import frames, meta_sync, movies, reports
 # from app.query import get_random_movie
@@ -18,6 +19,15 @@ app.include_router(frames.router)
 app.include_router(reports.router)
 app.include_router(meta_sync.router)
 app.include_router(movies.router)
+
+
+class SyncYearsPayload(BaseModel):
+    start_year: int
+    end_year: int | None = None
+    limit: int = 5000
+    resume: bool = True
+    content_type: str = "movie"
+    sort_by: str = "vote_count.desc"
 
 
 @app.on_event("startup")
@@ -61,9 +71,28 @@ async def startup_event():
 #     return await get_meta_info()
 
 
-@app.post("/sync/top-votes")
-async def sync_top_votes(limit: int = 10000, resume: bool = True, start_page: int | None = None):
-    return await sync_top_by_vote_count(limit=limit, resume=resume, start_page=start_page)
+@app.post("/sync/top-votes", status_code=202)
+async def sync_by_top_votes(
+    background_tasks: BackgroundTasks,
+    limit: int = Query(10_000, ge=1, le=50_000),
+    resume: bool = True,
+    start_page: int | None = None,
+):
+    """
+    Стартует синхронизацию топа по vote_count в фоне.
+    Ответ возвращаем сразу, прогресс смотрим по sync_cursors_collection.
+    """
+    background_tasks.add_task(
+        sync_top_by_vote_count,
+        limit=limit,
+        resume=resume,
+        start_page=start_page,
+    )
+    return {
+        "status": "accepted",
+        "detail": "sync_top_by_vote_count started in background",
+        "params": {"limit": limit, "resume": resume, "start_page": start_page},
+    }
 
 
 @app.get("/sync/status")
@@ -72,16 +101,28 @@ async def sync_status():
     return doc or {"key": "top_vote_count_movie", "page": 0, "inserted": 0, "updated": 0}
 
 
-@app.post("/sync/years")
+@app.post("/sync/years", status_code=202)
 async def sync_by_years(
-    start_year: int,
-    end_year: int | None = None,
-    limit: int = 5000,
-    resume: bool = True,
-    _type: str = "movie",
-    sort_by: str = "popularity.desc",  # допускаем: popularity.desc | vote_count.desc | release_date.desc/asc
+    payload: SyncYearsPayload,
+    background_tasks: BackgroundTasks,
 ):
-    return await sync_years(start_year=start_year, end_year=end_year, limit=limit, resume=resume, content_type=_type, sort_by=sort_by)
+    """
+    Стартует синхронизацию по годам в фоне.
+    """
+    background_tasks.add_task(
+        sync_years,
+        payload.start_year,
+        payload.end_year,
+        payload.limit,
+        payload.resume,
+        payload.content_type,
+        payload.sort_by,
+    )
+    return {
+        "status": "accepted",
+        "detail": "sync_years started in background",
+        "params": payload.model_dump(),
+    }
 
 
 @app.get("/sync/status/years")

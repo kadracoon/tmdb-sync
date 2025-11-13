@@ -19,40 +19,28 @@ from app.tmdb_client import (
 )
 
 
-
-async def fetch_title_ru(item_id: int, content_type: str = "movie") -> str:
-    """
-    Получить локализованный заголовок для фильма или сериала (ru-RU).
-
-    ВАЖНО: при любых сетевых/HTTP ошибках НИЧЕГО не пробрасываем наверх:
-    логируем в sync_errors_collection и возвращаем пустую строку.
-    """
-    params = {
-        "api_key": settings.tmdb_api_key,
-        "language": "ru-RU",
-    }
-    max_attempts = 5
-    last_exc: Exception | None = None
+async def fetch_title_ru(item_id: int, content_type: str = "movie") -> str | None:
+    """Получить локализованный заголовок для фильма или сериала (ru-RU) с ретраями."""
+    max_attempts = 3
 
     for attempt in range(1, max_attempts + 1):
         try:
             async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
                 response = await client.get(
                     f"https://api.themoviedb.org/3/{content_type}/{item_id}",
-                    params=params,
+                    params={"api_key": settings.tmdb_api_key, "language": "ru-RU"},
                 )
                 response.raise_for_status()
                 data = response.json()
-                # title для фильмов, name для сериалов
-                return data.get("title") or data.get("name") or ""
+                return data.get("title") or data.get("name")
 
         except HTTPStatusError as e:
             logger.error(
-                "TMDB RU-title HTTP error %s %s (%s %s)",
+                "TMDB RU-title HTTP error %s for %s id=%s: %s",
                 e.response.status_code,
-                e.request.url,
                 content_type,
                 item_id,
+                e.request.url,
             )
             await sync_errors_collection.insert_one({
                 "endpoint": e.request.url.path,
@@ -60,18 +48,15 @@ async def fetch_title_ru(item_id: int, content_type: str = "movie") -> str:
                 "status_code": e.response.status_code,
                 "params": dict(e.request.url.params),
                 "response_text": e.response.text,
-                "content_type": content_type,
                 "item_id": item_id,
-                "scope": "fetch_title_ru",
+                "content_type": content_type,
                 "timestamp": datetime.utcnow(),
             })
-            # статусный ответ TMDB — ретраить бессмысленно
-            return ""
+            return None
 
         except (ConnectError, ReadTimeout) as e:
-            last_exc = e
             logger.warning(
-                "TMDB RU-title network error (%s %s) attempt %s/%s: %r",
+                "TMDB RU-title network error (%s id=%s) attempt %s/%s: %r",
                 content_type,
                 item_id,
                 attempt,
@@ -81,19 +66,17 @@ async def fetch_title_ru(item_id: int, content_type: str = "movie") -> str:
             if attempt == max_attempts:
                 await sync_errors_collection.insert_one({
                     "endpoint": f"/{content_type}/{item_id}",
-                    "content_type": content_type,
                     "item_id": item_id,
-                    "scope": "fetch_title_ru",
-                    "error": f"network error after {max_attempts} attempts: {repr(e)}",
+                    "content_type": content_type,
+                    "error": f"RU-title network error after {max_attempts} attempts: {repr(e)}",
                     "timestamp": datetime.utcnow(),
                 })
-                return ""
+                return None
             await asyncio.sleep(attempt)
 
         except Exception as e:
-            last_exc = e
             logger.exception(
-                "Unexpected error in fetch_title_ru(%s %s) attempt %s/%s",
+                "Unexpected error fetching RU-title for %s id=%s (attempt %s/%s)",
                 content_type,
                 item_id,
                 attempt,
@@ -102,25 +85,15 @@ async def fetch_title_ru(item_id: int, content_type: str = "movie") -> str:
             if attempt == max_attempts:
                 await sync_errors_collection.insert_one({
                     "endpoint": f"/{content_type}/{item_id}",
-                    "content_type": content_type,
                     "item_id": item_id,
-                    "scope": "fetch_title_ru",
-                    "error": f"unexpected error after {max_attempts} attempts: {repr(e)}",
+                    "content_type": content_type,
+                    "error": f"RU-title unexpected error after {max_attempts} attempts: {repr(e)}",
                     "timestamp": datetime.utcnow(),
                 })
-                return ""
+                return None
             await asyncio.sleep(attempt)
 
-    # теоретически сюда не дойдём, но пусть будет
-    logger.error(
-        "fetch_title_ru(%s %s) failed after %s attempts: %r",
-        content_type,
-        item_id,
-        max_attempts,
-        last_exc,
-    )
-    return ""
-
+    return None
 
 
 def enrich_common_fields(item: dict, content_type: str, category: str) -> dict:
