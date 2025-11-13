@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from typing import Literal
 
 from fastapi import BackgroundTasks, FastAPI, Query
@@ -6,7 +7,7 @@ from pydantic import BaseModel
 from app.endpoints import frames, meta_sync, movies, reports
 # from app.query import get_random_movie
 # from app.meta import get_meta_info
-from app.mongo import ensure_indexes, sync_cursors_collection
+from app.mongo import ensure_indexes, sync_cursors_collection, sync_errors_collection
 from app.scheduler import start_scheduler
 # from app.sync import sync_category, sync_discover_movies
 from app.sync_top import sync_top_by_vote_count
@@ -96,9 +97,80 @@ async def sync_by_top_votes(
 
 
 @app.get("/sync/status")
-async def sync_status():
-    doc = await sync_cursors_collection.find_one({"key": "top_vote_count_movie"}, {"_id": 0})  # type: ignore
-    return doc or {"key": "top_vote_count_movie", "page": 0, "inserted": 0, "updated": 0}
+async def get_sync_status():
+    """
+    Краткий статус синхронизаций:
+
+    - top-votes: прогресс по курсу top_vote_count_movie
+    - years: список курсоров по годам (years:{content_type}:{year})
+    - errors: количество ошибок из sync_errors_collection
+    """
+    now = datetime.utcnow()
+    one_hour_ago = now - timedelta(hours=1)
+    one_day_ago = now - timedelta(days=1)
+
+    # --- собираем курсоры ---
+    top_votes: dict | None = None
+    years: list[dict] = []
+
+    async for cur in sync_cursors_collection.find({}):  # type: ignore
+        key = cur.get("key")
+        if not key:
+            continue
+
+        # топ по голосам
+        if key == "top_vote_count_movie":
+            top_votes = {
+                "key": key,
+                "page": cur.get("page", 0),
+                "inserted": cur.get("inserted", 0),
+                "updated": cur.get("updated", 0),
+                "ts": cur.get("ts"),
+            }
+            continue
+
+        # курсоры по годам: years:{content_type}:{year}
+        if isinstance(key, str) and key.startswith("years:"):
+            # ожидаем формат years:movie:1999 или years:tv:2010
+            try:
+                _, content_type, year_str = key.split(":", 2)
+                year = int(year_str)
+            except ValueError:
+                # странный ключ — пропускаем
+                continue
+
+            years.append({
+                "key": key,
+                "content_type": content_type,
+                "year": year,
+                "page": cur.get("page", 0),
+                "inserted": cur.get("inserted", 0),
+                "updated": cur.get("updated", 0),
+                "ts": cur.get("ts"),
+            })
+
+    # чтобы было красиво — отсортируем годы
+    years.sort(key=lambda x: (x["content_type"], x["year"]))
+
+    # --- собираем статистику по ошибкам ---
+    errors_last_hour = await sync_errors_collection.count_documents({  # type: ignore
+        "timestamp": {"$gte": one_hour_ago},
+    })
+    errors_last_day = await sync_errors_collection.count_documents({  # type: ignore
+        "timestamp": {"$gte": one_day_ago},
+    })
+    errors_total = await sync_errors_collection.estimated_document_count()  # type: ignore
+
+    return {
+        "top_votes": top_votes,
+        "years": years,
+        "errors": {
+            "last_hour": errors_last_hour,
+            "last_24h": errors_last_day,
+            "total": errors_total,
+        },
+        "generated_at": now,
+    }
 
 
 @app.post("/sync/years", status_code=202)
