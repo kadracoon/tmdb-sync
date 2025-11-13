@@ -1,6 +1,6 @@
 from datetime import datetime
 import httpx
-from httpx import HTTPStatusError
+from httpx import HTTPStatusError, ConnectError, ReadTimeout
 
 from app.config import settings
 from app.logging import logger

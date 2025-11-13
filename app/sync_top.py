@@ -13,7 +13,7 @@ from app.mongo import (
 )
 from app.catalog.upsert import upsert_movie
 from app.sync import enrich_common_fields, fetch_title_ru
-from app.tmdb_client import fetch_backdrops, TMDB_TIMEOUT
+from app.tmdb_client import fetch_backdrops, fetch_details, TMDB_TIMEOUT
 
 
 CURSOR_KEY = "top_vote_count_movie"  # ключ для прогресса
@@ -147,29 +147,43 @@ async def sync_top_by_vote_count(limit: int = 10000, resume: bool = True, start_
         for movie in results:
             processed += 1
             if processed > limit:
-                await _save_cursor({"key": CURSOR_KEY, "page": page, "inserted": cur.get("inserted", 0) + inserted, "updated": cur.get("updated", 0) + updated})
-                return {"status": "ok", "page": page, "processed": processed, "inserted": inserted, "updated": updated}
+                await _save_cursor({
+                    "key": CURSOR_KEY,
+                    "page": page,
+                    "inserted": cur.get("inserted", 0) + inserted,
+                    "updated": cur.get("updated", 0) + updated,
+                })
+                return {
+                    "status": "ok",
+                    "page": page,
+                    "processed": processed,
+                    "inserted": inserted,
+                    "updated": updated,
+                }
 
             try:
-                # детали
-                async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
-                    details = await client.get(
-                        f"https://api.themoviedb.org/3/movie/{movie['id']}",
-                        params={"api_key": settings.tmdb_api_key, "language": "en-US"},
-                    )
-                    details.raise_for_status()
-                    det = details.json()
+                tmdb_id = movie.get("id")
+                if not tmdb_id:
+                    continue
+
+                # детали через общий клиент
+                det = await fetch_details(tmdb_id, "movie")
+                if not det:
+                    # helper уже залогировал ошибку, просто пропускаем фильм
+                    logger.warning("No details returned for movie %s in top-votes sync", tmdb_id)
+                    continue
+
                 movie["production_countries"] = det.get("production_countries", [])
 
                 # общие поля
                 movie = enrich_common_fields(movie, "movie", "discover_top_votes")
-                movie["title_ru"] = await fetch_title_ru(movie["id"], "movie")
+                movie["title_ru"] = await fetch_title_ru(tmdb_id, "movie")
 
                 # ВСЕ кадры
-                movie["frames"] = await fetch_backdrops(movie["id"], "movie")
+                movie["frames"] = await fetch_backdrops(tmdb_id, "movie")
 
                 # апсёрт с сохранением incorrect_frames + пересчётом backdrop_path
-                before = await movies_collection.find_one({"id": movie["id"], "_type": "movie"}, {"_id": 1})
+                before = await movies_collection.find_one({"id": tmdb_id, "_type": "movie"}, {"_id": 1})
                 await upsert_movie(movie)
                 if before:
                     updated += 1
@@ -184,16 +198,18 @@ async def sync_top_by_vote_count(limit: int = 10000, resume: bool = True, start_
                     "status_code": e.response.status_code,
                     "params": dict(e.request.url.params),
                     "response_text": e.response.text,
+                    "movie_id": movie.get("id"),
                     "timestamp": datetime.utcnow(),
                 })
             except Exception as e:
                 logger.exception("Unexpected while upserting %s", movie.get("id"))
                 await sync_errors_collection.insert_one({
-                    "endpoint": "upsert_movie",
+                    "endpoint": "upsert_movie(top-votes)",
                     "error": str(e),
                     "movie_id": movie.get("id"),
                     "timestamp": datetime.utcnow(),
                 })
+
 
         # сохраним прогресс и идём дальше
         await _save_cursor({"key": CURSOR_KEY, "page": page, "inserted": cur.get("inserted", 0) + inserted, "updated": cur.get("updated", 0) + updated})
