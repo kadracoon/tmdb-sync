@@ -142,68 +142,133 @@ async def fetch_backdrops(item_id: int, content_type: str = "movie") -> list[dic
     Возвращает ВСЕ backdrops (НЕ постеры) для фильма/сериала.
     Формат элемента: {path, aspect_ratio, vote_average, width}
     Отфильтрованы по разумному AR и отсортированы по (vote_average desc, width desc).
-    """
-    try:
-        async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
-            resp = await client.get(
-                f"{BASE_URL}/{content_type}/{item_id}/images",
-                params={
-                    "api_key": settings.tmdb_api_key,
-                    # расширяем языки, чтобы не терять кадры
-                    "include_image_language": "null,en,ru"
-                }
-            )
-            resp.raise_for_status()
-            data = resp.json()
 
-        backdrops = data.get("backdrops", []) or []
-        if not backdrops:
+    ВАЖНО: при любых ошибках TMDB возвращает [] и логирует в sync_errors_collection.
+    """
+    params = {
+        "api_key": settings.tmdb_api_key,
+        "include_image_language": "null,en,ru",
+    }
+
+    max_attempts = 5
+    last_exc: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
+                resp = await client.get(
+                    f"{BASE_URL}/{content_type}/{item_id}/images",
+                    params=params,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+            backdrops = data.get("backdrops", []) or []
+            if not backdrops:
+                return []
+
+            def is_valid(b: dict) -> bool:
+                ar = b.get("aspect_ratio", 0) or 0
+                # мягкий фильтр: кадры кинематографического формата и не совсем низкооценённые
+                return 1.5 <= ar <= 2.2 and (b.get("vote_average") or 0) >= 0
+
+            frames: list[dict] = []
+            seen: set[str] = set()
+
+            for b in backdrops:
+                if not is_valid(b):
+                    continue
+                path = b.get("file_path")
+                if not path or path in seen:
+                    continue
+                seen.add(path)
+                frames.append({
+                    "path": path,
+                    "aspect_ratio": b.get("aspect_ratio"),
+                    "vote_average": b.get("vote_average") or 0,
+                    "width": b.get("width"),
+                })
+
+            frames.sort(
+                key=lambda f: (
+                    f.get("vote_average", 0) or 0,
+                    f.get("width", 0) or 0,
+                ),
+                reverse=True,
+            )
+            return frames
+
+        except HTTPStatusError as e:
+            # 4xx/5xx — ретраи особо не помогут, логируем и выходим
+            logger.error(
+                "TMDB frame API HTTP error %s %s (%s %s)",
+                e.response.status_code,
+                e.request.url,
+                content_type,
+                item_id,
+            )
+            await sync_errors_collection.insert_one({
+                "endpoint": e.request.url.path,
+                "url": str(e.request.url),
+                "status_code": e.response.status_code,
+                "params": dict(e.request.url.params),
+                "response_text": e.response.text,
+                "content_type": content_type,
+                "item_id": item_id,
+                "timestamp": datetime.utcnow(),
+            })
             return []
 
-        def is_valid(b: dict) -> bool:
-            # мягкий фильтр: кадры кинематографического формата и не совсем низкооценённые
-            ar = b.get("aspect_ratio", 0) or 0
-            return 1.5 <= ar <= 2.2 and (b.get("vote_average") or 0) >= 0
+        except (ConnectError, ReadTimeout) as e:
+            last_exc = e
+            logger.warning(
+                "TMDB frame API network error (%s %s) attempt %s/%s: %r",
+                content_type,
+                item_id,
+                attempt,
+                max_attempts,
+                e,
+            )
+            if attempt == max_attempts:
+                await sync_errors_collection.insert_one({
+                    "endpoint": f"/{content_type}/{item_id}/images",
+                    "content_type": content_type,
+                    "item_id": item_id,
+                    "error": f"network error after {max_attempts} attempts: {repr(e)}",
+                    "timestamp": datetime.utcnow(),
+                })
+                return []
+            await asyncio.sleep(attempt)
 
-        frames = []
-        seen = set()
-        for b in backdrops:
-            if not is_valid(b):
-                continue
-            path = b.get("file_path")
-            if not path or path in seen:
-                continue
-            seen.add(path)
-            frames.append({
-                "path": path,
-                "aspect_ratio": b.get("aspect_ratio"),
-                "vote_average": b.get("vote_average") or 0,
-                "width": b.get("width"),
-            })
+        except Exception as e:
+            last_exc = e
+            logger.exception(
+                "Unexpected error in fetch_backdrops(%s %s) attempt %s/%s",
+                content_type,
+                item_id,
+                attempt,
+                max_attempts,
+            )
+            if attempt == max_attempts:
+                await sync_errors_collection.insert_one({
+                    "endpoint": f"/{content_type}/{item_id}/images",
+                    "content_type": content_type,
+                    "item_id": item_id,
+                    "error": f"unexpected error after {max_attempts} attempts: {repr(e)}",
+                    "timestamp": datetime.utcnow(),
+                })
+                return []
+            await asyncio.sleep(attempt)
 
-        # сортируем по качеству: сначала оценка кадра, потом ширина
-        frames.sort(key=lambda f: (f.get("vote_average", 0) or 0, f.get("width", 0) or 0), reverse=True)
-        return frames
-
-    except HTTPStatusError as e:
-        logger.error(f"TMDB frame API error: {e.response.status_code} on {e.request.url}")
-        await sync_errors_collection.insert_one({
-            "endpoint": e.request.url.path,
-            "url": str(e.request.url),
-            "status_code": e.response.status_code,
-            "params": dict(e.request.url.params),
-            "response_text": e.response.text,
-            "timestamp": datetime.utcnow()
-        })
-    except Exception as e:
-        logger.exception(f"Failed to fetch frames for {content_type} {item_id}")
-        await sync_errors_collection.insert_one({
-            "endpoint": f"{content_type}/{item_id}/images",
-            "error": str(e),
-            "timestamp": datetime.utcnow()
-        })
-
+    logger.error(
+        "fetch_backdrops(%s %s) failed after %s attempts: %r",
+        content_type,
+        item_id,
+        max_attempts,
+        last_exc,
+    )
     return []
+
 
 
 async def fetch_best_frames(item_id: int, content_type: str = "movie", limit: int = 5) -> list[dict]:

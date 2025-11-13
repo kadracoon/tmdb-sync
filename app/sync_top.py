@@ -121,7 +121,11 @@ async def _fetch_discover_vote_count(page: int) -> dict | None:
     return None
 
 
-async def sync_top_by_vote_count(limit: int = 10000, resume: bool = True, start_page: int | None = None) -> dict:
+async def sync_top_by_vote_count(
+    limit: int = 10000,
+    resume: bool = True,
+    start_page: int | None = None,
+) -> dict:
     cur = await _get_cursor()
     page = start_page or (cur["page"] + 1 if resume else 1)
 
@@ -133,9 +137,8 @@ async def sync_top_by_vote_count(limit: int = 10000, resume: bool = True, start_
         data = await _fetch_discover_vote_count(page)
 
         if data is None:
-            # _fetch_discover_vote_count уже всё залогировал в sync_errors
             logger.error(
-                "Stopping sync_top_by_vote_count at page=%s due to TMDB errors",
+                "Stopping sync_top_by_vote_count at page=%s due to TMDB discover errors",
                 page,
             )
             break
@@ -161,29 +164,37 @@ async def sync_top_by_vote_count(limit: int = 10000, resume: bool = True, start_
                     "updated": updated,
                 }
 
-            try:
-                tmdb_id = movie.get("id")
-                if not tmdb_id:
-                    continue
+            tmdb_id = movie.get("id")
+            if not tmdb_id:
+                continue
 
-                # детали через общий клиент
-                det = await fetch_details(tmdb_id, "movie")
-                if not det:
-                    # helper уже залогировал ошибку, просто пропускаем фильм
-                    logger.warning("No details returned for movie %s in top-votes sync", tmdb_id)
-                    continue
+            try:
+                # --- детали ---
+                async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
+                    details = await client.get(
+                        f"https://api.themoviedb.org/3/movie/{tmdb_id}",
+                        params={
+                            "api_key": settings.tmdb_api_key,
+                            "language": "en-US",
+                        },
+                    )
+                    details.raise_for_status()
+                    det = details.json()
 
                 movie["production_countries"] = det.get("production_countries", [])
 
-                # общие поля
+                # --- общие поля ---
                 movie = enrich_common_fields(movie, "movie", "discover_top_votes")
                 movie["title_ru"] = await fetch_title_ru(tmdb_id, "movie")
 
-                # ВСЕ кадры
+                # --- ВСЕ кадры ---
                 movie["frames"] = await fetch_backdrops(tmdb_id, "movie")
 
-                # апсёрт с сохранением incorrect_frames + пересчётом backdrop_path
-                before = await movies_collection.find_one({"id": tmdb_id, "_type": "movie"}, {"_id": 1})
+                # --- апсёрт ---
+                before = await movies_collection.find_one(
+                    {"id": tmdb_id, "_type": "movie"},
+                    {"_id": 1},
+                )
                 await upsert_movie(movie)
                 if before:
                     updated += 1
@@ -191,28 +202,62 @@ async def sync_top_by_vote_count(limit: int = 10000, resume: bool = True, start_
                     inserted += 1
 
             except HTTPStatusError as e:
-                logger.error("TMDB details/frames error %s %s", e.response.status_code, e.request.url)
+                logger.error(
+                    "TMDB details HTTP error %s %s (movie_id=%s)",
+                    e.response.status_code,
+                    e.request.url,
+                    tmdb_id,
+                )
                 await sync_errors_collection.insert_one({
                     "endpoint": e.request.url.path,
                     "url": str(e.request.url),
                     "status_code": e.response.status_code,
                     "params": dict(e.request.url.params),
                     "response_text": e.response.text,
-                    "movie_id": movie.get("id"),
+                    "movie_id": tmdb_id,
                     "timestamp": datetime.utcnow(),
                 })
-            except Exception as e:
-                logger.exception("Unexpected while upserting %s", movie.get("id"))
+                # просто пропускаем этот фильм
+                continue
+
+            except (ConnectError, ReadTimeout) as e:
+                logger.warning(
+                    "Network error while processing movie_id=%s in top-votes: %r",
+                    tmdb_id,
+                    e,
+                )
                 await sync_errors_collection.insert_one({
-                    "endpoint": "upsert_movie(top-votes)",
-                    "error": str(e),
-                    "movie_id": movie.get("id"),
+                    "endpoint": "/movie/details-or-images",
+                    "movie_id": tmdb_id,
+                    "error": f"network error: {repr(e)}",
                     "timestamp": datetime.utcnow(),
                 })
+                # тоже пропускаем этот фильм, двигаемся дальше
+                continue
 
+            except Exception as e:
+                logger.exception("Unexpected while upserting %s", tmdb_id)
+                await sync_errors_collection.insert_one({
+                    "endpoint": "upsert_movie",
+                    "error": str(e),
+                    "movie_id": tmdb_id,
+                    "timestamp": datetime.utcnow(),
+                })
+                # и здесь тоже: не роняем процесс, идём далее
+                continue
 
-        # сохраним прогресс и идём дальше
-        await _save_cursor({"key": CURSOR_KEY, "page": page, "inserted": cur.get("inserted", 0) + inserted, "updated": cur.get("updated", 0) + updated})
+        await _save_cursor({
+            "key": CURSOR_KEY,
+            "page": page,
+            "inserted": cur.get("inserted", 0) + inserted,
+            "updated": cur.get("updated", 0) + updated,
+        })
         page += 1
 
-    return {"status": "done", "page": page, "processed": processed, "inserted": inserted, "updated": updated}
+    return {
+        "status": "done",
+        "page": page,
+        "processed": processed,
+        "inserted": inserted,
+        "updated": updated,
+    }
