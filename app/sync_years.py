@@ -1,3 +1,5 @@
+import asyncio
+
 from datetime import datetime
 import httpx
 from httpx import HTTPStatusError, ConnectError, ReadTimeout
