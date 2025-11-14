@@ -13,7 +13,7 @@ from app.mongo import (
 )
 from app.catalog.upsert import upsert_movie
 from app.sync import enrich_common_fields, fetch_title_ru
-from app.tmdb_client import fetch_backdrops, fetch_details, TMDB_TIMEOUT
+from app.tmdb_client import get_tmdb_client, fetch_backdrops, TMDB_TIMEOUT
 
 
 CURSOR_KEY = "top_vote_count_movie"  # ключ для прогресса
@@ -45,16 +45,16 @@ async def _fetch_discover_vote_count(page: int) -> dict | None:
 
     max_attempts = 5
     last_exc: Exception | None = None
+    client = await get_tmdb_client()
 
     for attempt in range(1, max_attempts + 1):
         try:
-            async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
-                r = await client.get(
-                    "https://api.themoviedb.org/3/discover/movie",
-                    params=params,
-                )
-                r.raise_for_status()
-                return r.json()
+            r = await client.get(
+                "https://api.themoviedb.org/3/discover/movie",
+                params=params,
+            )
+            r.raise_for_status()
+            return r.json()
 
         except HTTPStatusError as e:
             # TMDB ответил 4xx/5xx — ретраи мало помогут
@@ -126,12 +126,23 @@ async def sync_top_by_vote_count(
     resume: bool = True,
     start_page: int | None = None,
 ) -> dict:
+    """
+    Синхронизируем топ по vote_count.
+    limit — КОЛИЧЕСТВО УСПЕШНО СОХРАНЁННЫХ фильмов (saved), а не просто попыток.
+    """
     cur = await _get_cursor()
     page = start_page or (cur["page"] + 1 if resume else 1)
 
-    processed = 0
+    attempted = 0
+    saved = 0
     inserted = 0
     updated = 0
+
+    skipped_network = 0
+    skipped_http = 0
+    skipped_other = 0
+
+    client = await get_tmdb_client()
 
     while True:
         data = await _fetch_discover_vote_count(page)
@@ -148,8 +159,7 @@ async def sync_top_by_vote_count(
             break
 
         for movie in results:
-            processed += 1
-            if processed > limit:
+            if saved >= limit:
                 await _save_cursor({
                     "key": CURSOR_KEY,
                     "page": page,
@@ -159,27 +169,33 @@ async def sync_top_by_vote_count(
                 return {
                     "status": "ok",
                     "page": page,
-                    "processed": processed,
+                    "processed": attempted,  # для обратной совместимости
+                    "attempted": attempted,
+                    "saved": saved,
                     "inserted": inserted,
                     "updated": updated,
+                    "skipped_network": skipped_network,
+                    "skipped_http": skipped_http,
+                    "skipped_other": skipped_other,
                 }
 
             tmdb_id = movie.get("id")
             if not tmdb_id:
                 continue
 
+            attempted += 1
+
             try:
                 # --- детали ---
-                async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
-                    details = await client.get(
-                        f"https://api.themoviedb.org/3/movie/{tmdb_id}",
-                        params={
-                            "api_key": settings.tmdb_api_key,
-                            "language": "en-US",
-                        },
-                    )
-                    details.raise_for_status()
-                    det = details.json()
+                details = await client.get(
+                    f"https://api.themoviedb.org/3/movie/{tmdb_id}",
+                    params={
+                        "api_key": settings.tmdb_api_key,
+                        "language": "en-US",
+                    },
+                )
+                details.raise_for_status()
+                det = details.json()
 
                 movie["production_countries"] = det.get("production_countries", [])
 
@@ -201,7 +217,10 @@ async def sync_top_by_vote_count(
                 else:
                     inserted += 1
 
+                saved += 1
+
             except HTTPStatusError as e:
+                skipped_http += 1
                 logger.error(
                     "TMDB details HTTP error %s %s (movie_id=%s)",
                     e.response.status_code,
@@ -217,10 +236,10 @@ async def sync_top_by_vote_count(
                     "movie_id": tmdb_id,
                     "timestamp": datetime.utcnow(),
                 })
-                # просто пропускаем этот фильм
                 continue
 
             except (ConnectError, ReadTimeout) as e:
+                skipped_network += 1
                 logger.warning(
                     "Network error while processing movie_id=%s in top-votes: %r",
                     tmdb_id,
@@ -232,10 +251,10 @@ async def sync_top_by_vote_count(
                     "error": f"network error: {repr(e)}",
                     "timestamp": datetime.utcnow(),
                 })
-                # тоже пропускаем этот фильм, двигаемся дальше
                 continue
 
             except Exception as e:
+                skipped_other += 1
                 logger.exception("Unexpected while upserting %s", tmdb_id)
                 await sync_errors_collection.insert_one({
                     "endpoint": "upsert_movie",
@@ -243,7 +262,6 @@ async def sync_top_by_vote_count(
                     "movie_id": tmdb_id,
                     "timestamp": datetime.utcnow(),
                 })
-                # и здесь тоже: не роняем процесс, идём далее
                 continue
 
         await _save_cursor({
@@ -257,7 +275,13 @@ async def sync_top_by_vote_count(
     return {
         "status": "done",
         "page": page,
-        "processed": processed,
+        "processed": attempted,
+        "attempted": attempted,
+        "saved": saved,
         "inserted": inserted,
         "updated": updated,
+        "skipped_network": skipped_network,
+        "skipped_http": skipped_http,
+        "skipped_other": skipped_other,
     }
+

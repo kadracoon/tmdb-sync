@@ -1,5 +1,6 @@
-from datetime import datetime
 import asyncio
+from datetime import datetime
+from typing import Optional
 
 import httpx
 from httpx import HTTPStatusError, ConnectError, ReadTimeout
@@ -11,6 +12,33 @@ from app.mongo import sync_errors_collection
 BASE_URL = "https://api.themoviedb.org/3"
 IMAGE_CDN = "https://image.tmdb.org/t/p/"
 TMDB_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
+
+
+# ===== ГЛОБАЛЬНЫЙ КЛИЕНТ =====
+
+_tmdb_client: Optional[httpx.AsyncClient] = None
+
+
+async def get_tmdb_client() -> httpx.AsyncClient:
+    """
+    Один общий httpx.AsyncClient для всех запросов к TMDB.
+    """
+    global _tmdb_client
+    if _tmdb_client is None:
+        _tmdb_client = httpx.AsyncClient(
+            timeout=TMDB_TIMEOUT,
+            http2=False,
+        )
+    return _tmdb_client
+
+
+async def close_tmdb_client() -> None:
+    global _tmdb_client
+    if _tmdb_client is not None:
+        await _tmdb_client.aclose()
+        _tmdb_client = None
+
+# ===== /ГЛОБАЛЬНЫЙ КЛИЕНТ =====
 
 
 async def fetch_category(category: str, page: int = 1) -> dict:
@@ -26,16 +54,16 @@ async def fetch_category(category: str, page: int = 1) -> dict:
 
     max_attempts = 5
     last_exc: Exception | None = None
+    client = await get_tmdb_client()
 
     for attempt in range(1, max_attempts + 1):
         try:
-            async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
-                resp = await client.get(
-                    f"{BASE_URL}/movie/{category}",
-                    params=params,
-                )
-                resp.raise_for_status()
-                return resp.json()
+            resp = await client.get(
+                f"{BASE_URL}/movie/{category}",
+                params=params,
+            )
+            resp.raise_for_status()
+            return resp.json()
 
         except HTTPStatusError as e:
             logger.error(
@@ -109,14 +137,14 @@ async def fetch_category(category: str, page: int = 1) -> dict:
 
 
 async def fetch_tv_category(category: str, page: int = 1):
+    client = await get_tmdb_client()
     try:
-        async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
-            resp = await client.get(
-                f"{BASE_URL}/tv/{category}",
-                params={"api_key": settings.tmdb_api_key, "language": "en-US", "page": page}
-            )
-            resp.raise_for_status()
-            return resp.json()
+        resp = await client.get(
+            f"{BASE_URL}/tv/{category}",
+            params={"api_key": settings.tmdb_api_key, "language": "en-US", "page": page}
+        )
+        resp.raise_for_status()
+        return resp.json()
     except HTTPStatusError as e:
         logger.error(f"TMDB TV API error: {e.response.status_code} on {e.request.url}")
         await sync_errors_collection.insert_one({
@@ -145,19 +173,19 @@ async def fetch_backdrops(item_id: int, content_type: str = "movie") -> list[dic
     Отфильтрованы по разумному AR и отсортированы по (vote_average desc, width desc).
     """
     max_attempts = 3
+    client = await get_tmdb_client()
 
     for attempt in range(1, max_attempts + 1):
         try:
-            async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
-                resp = await client.get(
-                    f"{BASE_URL}/{content_type}/{item_id}/images",
-                    params={
-                        "api_key": settings.tmdb_api_key,
-                        "include_image_language": "null,en,ru",
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
+            resp = await client.get(
+                f"{BASE_URL}/{content_type}/{item_id}/images",
+                params={
+                    "api_key": settings.tmdb_api_key,
+                    "include_image_language": "null,en,ru",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
 
             backdrops = data.get("backdrops", []) or []
             if not backdrops:
@@ -279,16 +307,16 @@ async def fetch_discover_movies(page: int = 1) -> dict:
 
     max_attempts = 5
     last_exc: Exception | None = None
+    client = await get_tmdb_client()
 
     for attempt in range(1, max_attempts + 1):
         try:
-            async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
-                resp = await client.get(
-                    f"{BASE_URL}/discover/movie",
-                    params=params,
-                )
-                resp.raise_for_status()
-                return resp.json()
+            resp = await client.get(
+                f"{BASE_URL}/discover/movie",
+                params=params,
+            )
+            resp.raise_for_status()
+            return resp.json()
 
         except HTTPStatusError as e:
             logger.error(
@@ -360,16 +388,16 @@ async def fetch_details(item_id: int, content_type: str = "movie") -> dict:
     При сетевых ошибках делаем несколько попыток, потом возвращаем {}.
     """
     max_attempts = 3
+    client = await get_tmdb_client()
 
     for attempt in range(1, max_attempts + 1):
         try:
-            async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
-                resp = await client.get(
-                    f"{BASE_URL}/{content_type}/{item_id}",
-                    params={"api_key": settings.tmdb_api_key, "language": "en-US"},
-                )
-                resp.raise_for_status()
-                return resp.json()
+            resp = await client.get(
+                f"{BASE_URL}/{content_type}/{item_id}",
+                params={"api_key": settings.tmdb_api_key, "language": "en-US"},
+            )
+            resp.raise_for_status()
+            return resp.json()
 
         except HTTPStatusError as e:
             # 4xx/5xx — ретраи обычно не спасут, просто логируем и выходим

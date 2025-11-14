@@ -5,17 +5,13 @@ from fastapi import BackgroundTasks, FastAPI, Query
 from pydantic import BaseModel
 
 from app.endpoints import frames, meta_sync, movies, reports
-# from app.query import get_random_movie
-# from app.meta import get_meta_info
 from app.mongo import ensure_indexes, sync_cursors_collection, sync_errors_collection
-from app.scheduler import start_scheduler
-# from app.sync import sync_category, sync_discover_movies
 from app.sync_top import sync_top_by_vote_count
 from app.sync_years import sync_years
+from app.tmdb_client import close_tmdb_client
 
 
 app = FastAPI()
-# app.include_router(catalog.router)
 app.include_router(frames.router)
 app.include_router(reports.router)
 app.include_router(meta_sync.router)
@@ -34,42 +30,11 @@ class SyncYearsPayload(BaseModel):
 @app.on_event("startup")
 async def startup_event():
     await ensure_indexes()
-    # start_scheduler()
 
 
-# @app.post("/sync/{category}")
-# async def sync(category: Literal["popular", "top_rated", "upcoming"]):
-#     result = await sync_category(category)
-#     return result
-
-
-# @app.post("/sync_discover")
-# async def sync_discover(pages: int = 1):
-#     return await sync_discover_movies(pages)
-
-
-# @app.get("/movies/random")
-# async def random_movie(
-#     genre_id: int | None = Query(None),
-#     country_code: str | None = Query(None),
-#     year_from: int | None = Query(None),
-#     year_to: int | None = Query(None),
-#     is_animated: bool | None = Query(None),
-#     _type: str | None = Query(None, pattern="^(movie|tv)$")
-# ):
-#     return await get_random_movie(
-#         genre_id=genre_id,
-#         country_code=country_code,
-#         year_from=year_from,
-#         year_to=year_to,
-#         is_animated=is_animated,
-#         _type=_type,
-#     )
-
-
-# @app.get("/meta")
-# async def meta():
-#     return await get_meta_info()
+@app.on_event("shutdown")
+async def shutdown_event():
+    await close_tmdb_client()
 
 
 @app.post("/sync/top-votes", status_code=202)

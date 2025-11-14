@@ -10,6 +10,7 @@ from app.logging import logger
 from app.mongo import movies_collection
 from app.mongo import sync_errors_collection
 from app.tmdb_client import (
+    get_tmdb_client,
     fetch_category,
     fetch_tv_category,
     fetch_best_frames,
@@ -22,17 +23,17 @@ from app.tmdb_client import (
 async def fetch_title_ru(item_id: int, content_type: str = "movie") -> str | None:
     """Получить локализованный заголовок для фильма или сериала (ru-RU) с ретраями."""
     max_attempts = 3
+    client = await get_tmdb_client()
 
     for attempt in range(1, max_attempts + 1):
         try:
-            async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
-                response = await client.get(
-                    f"https://api.themoviedb.org/3/{content_type}/{item_id}",
-                    params={"api_key": settings.tmdb_api_key, "language": "ru-RU"},
-                )
-                response.raise_for_status()
-                data = response.json()
-                return data.get("title") or data.get("name")
+            response = await client.get(
+                f"https://api.themoviedb.org/3/{content_type}/{item_id}",
+                params={"api_key": settings.tmdb_api_key, "language": "ru-RU"},
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get("title") or data.get("name")
 
         except HTTPStatusError as e:
             logger.error(

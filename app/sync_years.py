@@ -9,7 +9,7 @@ from app.logging import logger
 from app.mongo import movies_collection, sync_cursors_collection, sync_errors_collection
 from app.catalog.upsert import upsert_movie
 from app.sync import enrich_common_fields, fetch_title_ru, fetch_details
-from app.tmdb_client import fetch_backdrops, TMDB_TIMEOUT
+from app.tmdb_client import get_tmdb_client, fetch_backdrops, TMDB_TIMEOUT
 
 
 MAX_PAGES = 500
@@ -64,16 +64,16 @@ async def _fetch_discover_year_page(
 
     max_attempts = 5
     last_exc: Exception | None = None
+    client = await get_tmdb_client()
 
     for attempt in range(1, max_attempts + 1):
         try:
-            async with httpx.AsyncClient(http2=False, timeout=TMDB_TIMEOUT) as client:
-                r = await client.get(
-                    f"https://api.themoviedb.org/3/discover/{base}",
-                    params=params,
-                )
-                r.raise_for_status()
-                return r.json()
+            r = await client.get(
+                f"https://api.themoviedb.org/3/discover/{base}",
+                params=params,
+            )
+            r.raise_for_status()
+            return r.json()
 
         except HTTPStatusError as e:
             # TMDB вернул 4xx/5xx — ретраи обычно бессмысленны
